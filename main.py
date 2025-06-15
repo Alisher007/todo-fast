@@ -1,8 +1,9 @@
 # main.py
 
 from typing import List, Optional
-from sqlmodel import Field, Session, SQLModel, create_engine
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 from fastapi import FastAPI, HTTPException, Depends
+from contextlib import asynccontextmanager
 
 # --- Database Setup ---
 DATABASE_URL = "sqlite:///./todos.db" # This will create a file named todos.db in your project directory
@@ -20,22 +21,33 @@ def get_session():
     with Session(engine) as session:
         yield session
 
-# --- FastAPI App Initialization ---
-app = FastAPI()
-
-# Event handler to create tables when the application starts up
-@app.on_event("startup")
-def on_startup():
+# --- Lifespan Event Handler ---
+# This replaces @app.on_event("startup") and @app.on_event("shutdown")
+@asynccontextmanager # <--- Decorator for async context managers
+async def lifespan(app: FastAPI): # <--- Define the lifespan function
+    # Code that runs ON STARTUP
+    print("Creating database tables...")
     create_db_and_tables()
+    print("Database tables created!")
+    yield # <--- Application starts accepting requests here
+    # Code that runs ON SHUTDOWN (optional, but good for cleanup)
+    print("Shutting down...")
+    # You might close connections or do other cleanup here if needed
+    # For SQLite file, no explicit close needed for engine usually.
 
+# --- FastAPI App Initialization ---
+# Pass the lifespan function to the FastAPI constructor
+app = FastAPI(lifespan=lifespan) # <--- Pass lifespan to FastAPI constructor
 # --- TodoItem Model with SQLModel ---
 class TodoItem(SQLModel, table=True): # table=True tells SQLModel this is a database table
     id: Optional[int] = Field(default=None, primary_key=True) # Primary key, auto-incrementing
-    title: str = Field(index=True) # Add an index for faster lookups on title
+    title: str = Field(index=True, nullable=False, min_length=1) # Add an index for faster lookups on title
+    # <--- MODIFIED: Added min_length for Pydantic
+    # and by default, str implies not nullable
     completed: bool = Field(default=False)
 
-# --- FastAPI Endpoints (Refactored to use database session) ---
 
+# --- FastAPI Endpoints (Refactored to use database session) ---
 @app.get("/")
 def read_root():
     return {"message": "Welcome to your FastAPI Todo App!"}
@@ -43,6 +55,11 @@ def read_root():
 # Create Todo
 @app.post("/todos/", response_model=TodoItem)
 def create_todo(*, todo: TodoItem, session: Session = Depends(get_session)):
+    # Add a check here that should prevent the DB call if title is None
+    if todo.title is None:
+        print("ERROR: Todo title is None, but Pydantic should have caught this!")
+        raise HTTPException(status_code=400, detail="Title cannot be None at this stage.")
+
     session.add(todo) # Add the todo object to the session
     session.commit() # Commit the transaction to save to DB
     session.refresh(todo) # Refresh the object to get its ID from the DB
@@ -51,7 +68,7 @@ def create_todo(*, todo: TodoItem, session: Session = Depends(get_session)):
 # Read All Todos
 @app.get("/todos/", response_model=List[TodoItem])
 def read_todos(*, session: Session = Depends(get_session)):
-    todos = session.query(TodoItem).all() # Query all todos
+    todos = session.exec(select(TodoItem)).all() 
     return todos
 
 # Read Single Todo
